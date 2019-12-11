@@ -39,38 +39,6 @@ where
     }
 }
 
-/// .my_collect() is used in tests to call self.next() over and over until it has no
-/// more data. The hard work that each type actually performs (ex:
-/// CommentStrip strips out comments) is located in their .next(), meaning
-/// this can be generalized.
-#[cfg(test)]
-macro_rules! impl_my_collect_for_stream_iter {
-    () => {
-        /// Read all data from the source into a big buffer and return it as a vector
-        /// of bytes
-        #[cfg(test)]
-        fn my_collect(mut self) -> Vec<u8> {
-            let mut data = vec![];
-            loop {
-                let next = self.next();
-                if next.is_none() {
-                    return data;
-                }
-                let item = next.unwrap();
-                if item.is_err() {
-                    return data;
-                }
-                let len = item.unwrap();
-                if len < 1 {
-                    break;
-                }
-                data.extend_from_slice(&self.common.working_buf[..len]);
-            }
-            data
-        }
-    };
-}
-
 /// Each type impls Read. As all the hard work is done in self.next(), this can
 /// be generalized. .read() is probably how the user should be using these types.
 macro_rules! impl_read_trait_for_stream_iter {
@@ -204,9 +172,6 @@ where
             allowed_chars: allowed_chars.chars().collect(),
         }
     }
-
-    #[cfg(test)]
-    impl_my_collect_for_stream_iter!();
 }
 
 impl<T> Iterator for CharWhitelist<T>
@@ -284,9 +249,6 @@ where
             ignore_until_next_newline: false,
         }
     }
-
-    #[cfg(test)]
-    impl_my_collect_for_stream_iter!();
 }
 
 impl<T> Iterator for CommentStrip<T>
@@ -371,28 +333,27 @@ where
 
 impl_read_trait_for_stream_iter!(CommentStrip<T>);
 
-/// These tests exercise the underlying iterator functionality of
-/// CommentStrip, usually by means of the my_collect() function (custom, not
-/// like the std lib collect()). Most people should be using the read
-/// functionality of CommentStrip, which is tested elsewhere. The read part
-/// of CSI uses the iter part.
+#[cfg(test)]
+fn read_to_string(mut buf: impl Read) -> String {
+    let mut s = String::new();
+    buf.read_to_string(&mut s).unwrap();
+    s
+}
+
 #[cfg(test)]
 mod test_comment_strip_iter {
-    use super::{CommentStrip, BUF_SIZE};
+    use super::{read_to_string, CommentStrip, BUF_SIZE};
 
     #[test]
     fn empty_is_empty() {
         let s = "".as_bytes();
-        let out = CommentStrip::new(s).my_collect();
-        assert_eq!(s.to_vec(), out);
+        assert_eq!(read_to_string(CommentStrip::new(s)).len(), 0);
     }
 
     #[test]
     fn ignore_all_short() {
         for s in &["#foo baz", "#foo baz\n", "#    ", "#    \n", "#", "#\n"] {
-            let s = s.as_bytes();
-            let out = CommentStrip::new(s).my_collect();
-            assert_eq!(out.len(), 0);
+            assert_eq!(read_to_string(CommentStrip::new(s.as_bytes())).len(), 0);
         }
     }
 
@@ -402,29 +363,25 @@ mod test_comment_strip_iter {
         let mut s = vec!['#' as u8];
         s.append(&mut vec![' ' as u8; BUF_SIZE - 2]);
         assert_eq!(s.len(), BUF_SIZE - 1);
-        let out = CommentStrip::new(&s[..]).my_collect();
-        assert_eq!(out.len(), 0);
+        assert_eq!(read_to_string(CommentStrip::new(&s[..])).len(), 0);
 
         // exactly a full buffer
         let mut s = vec!['#' as u8];
         s.append(&mut vec![' ' as u8; BUF_SIZE - 1]);
         assert_eq!(s.len(), BUF_SIZE);
-        let out = CommentStrip::new(&s[..]).my_collect();
-        assert_eq!(out.len(), 0);
+        assert_eq!(read_to_string(CommentStrip::new(&s[..])).len(), 0);
 
         // just over a full buffer
         let mut s = vec!['#' as u8];
         s.append(&mut vec![' ' as u8; BUF_SIZE]);
         assert_eq!(s.len(), BUF_SIZE + 1);
-        let out = CommentStrip::new(&s[..]).my_collect();
-        assert_eq!(out.len(), 0);
+        assert_eq!(read_to_string(CommentStrip::new(&s[..])).len(), 0);
 
         // over 2 buffers in size
         let mut s = vec!['#' as u8];
         s.append(&mut vec![' ' as u8; BUF_SIZE * 2 + 2]);
         assert_eq!(s.len(), BUF_SIZE * 2 + 3);
-        let out = CommentStrip::new(&s[..]).my_collect();
-        assert_eq!(out.len(), 0);
+        assert_eq!(read_to_string(CommentStrip::new(&s[..])).len(), 0);
     }
 
     #[test]
@@ -434,51 +391,44 @@ mod test_comment_strip_iter {
         s.append(&mut vec![' ' as u8; BUF_SIZE - 3]);
         s.push('\n' as u8);
         assert_eq!(s.len(), BUF_SIZE - 1);
-        let out = CommentStrip::new(&s[..]).my_collect();
-        assert_eq!(out.len(), 0);
+        assert_eq!(read_to_string(CommentStrip::new(&s[..])).len(), 0);
 
         // exactly a full buffer
         let mut s = vec!['#' as u8];
         s.append(&mut vec![' ' as u8; BUF_SIZE - 2]);
         s.push('\n' as u8);
         assert_eq!(s.len(), BUF_SIZE);
-        let out = CommentStrip::new(&s[..]).my_collect();
-        assert_eq!(out.len(), 0);
+        assert_eq!(read_to_string(CommentStrip::new(&s[..])).len(), 0);
 
         // just over a full buffer
         let mut s = vec!['#' as u8];
         s.append(&mut vec![' ' as u8; BUF_SIZE - 1]);
         s.push('\n' as u8);
         assert_eq!(s.len(), BUF_SIZE + 1);
-        let out = CommentStrip::new(&s[..]).my_collect();
-        assert_eq!(out.len(), 0);
+        assert_eq!(read_to_string(CommentStrip::new(&s[..])).len(), 0);
 
         // over 2 buffers in size
         let mut s = vec!['#' as u8];
         s.append(&mut vec![' ' as u8; BUF_SIZE * 2 + 1]);
         s.push('\n' as u8);
         assert_eq!(s.len(), BUF_SIZE * 2 + 3);
-        let out = CommentStrip::new(&s[..]).my_collect();
-        assert_eq!(out.len(), 0);
+        assert_eq!(read_to_string(CommentStrip::new(&s[..])).len(), 0);
     }
 
     #[test]
     fn keep_end_short() {
         for s in &["#\nfoo", "#  \nfoo"] {
-            let out = CommentStrip::new(s.as_bytes()).my_collect();
-            let out = String::from_utf8_lossy(&out);
+            let out = read_to_string(CommentStrip::new(s.as_bytes()));
             assert_eq!(out, "foo");
         }
 
         for s in &["#\nfoo  foo", "#  \nfoo  foo"] {
-            let out = CommentStrip::new(s.as_bytes()).my_collect();
-            let out = String::from_utf8_lossy(&out);
+            let out = read_to_string(CommentStrip::new(s.as_bytes()));
             assert_eq!(out, "foo  foo");
         }
 
         for s in &["#\nfoo \n foo", "#  \nfoo \n foo"] {
-            let out = CommentStrip::new(s.as_bytes()).my_collect();
-            let out = String::from_utf8_lossy(&out);
+            let out = read_to_string(CommentStrip::new(s.as_bytes()));
             assert_eq!(out, "foo \n foo");
         }
     }
@@ -494,9 +444,7 @@ mod test_comment_strip_iter {
             s.push(c as u8);
         }
         assert_eq!(s.len(), BUF_SIZE - 1);
-        let out = CommentStrip::new(&s[..]).my_collect();
-        let out = String::from_utf8_lossy(&out);
-        assert_eq!(out, content);
+        assert_eq!(read_to_string(CommentStrip::new(&s[..])), content);
 
         // equal to BUF_SIZE
         let mut s = vec!['#' as u8; BUF_SIZE - content.len() - 1];
@@ -505,9 +453,7 @@ mod test_comment_strip_iter {
             s.push(c as u8);
         }
         assert_eq!(s.len(), BUF_SIZE);
-        let out = CommentStrip::new(&s[..]).my_collect();
-        let out = String::from_utf8_lossy(&out);
-        assert_eq!(out, content);
+        assert_eq!(read_to_string(CommentStrip::new(&s[..])), content);
 
         // just over BUF_SIZE
         let mut s = vec!['#' as u8; BUF_SIZE - content.len() - 1 + 1];
@@ -516,9 +462,7 @@ mod test_comment_strip_iter {
             s.push(c as u8);
         }
         assert_eq!(s.len(), BUF_SIZE + 1);
-        let out = CommentStrip::new(&s[..]).my_collect();
-        let out = String::from_utf8_lossy(&out);
-        assert_eq!(out, content);
+        assert_eq!(read_to_string(CommentStrip::new(&s[..])), content);
 
         // comment is over BUF_SIZE by itself
         let mut s = vec!['#' as u8; BUF_SIZE + 1];
@@ -527,48 +471,33 @@ mod test_comment_strip_iter {
             s.push(c as u8);
         }
         assert_eq!(s.len(), BUF_SIZE + 2 + content.len());
-        let out = CommentStrip::new(&s[..]).my_collect();
-        let out = String::from_utf8_lossy(&out);
-        assert_eq!(out, content);
+        assert_eq!(read_to_string(CommentStrip::new(&s[..])), content);
     }
 }
 
 #[cfg(test)]
 mod test_char_whitelist_iter {
-    use super::CharWhitelist;
+    use super::{read_to_string, CharWhitelist};
 
     #[test]
     fn empty_whitelist() {
-        let in_buf = "A\u{00a1}\u{01d6a9}".as_bytes().to_vec();
-        let output = CharWhitelist::new(&in_buf[..], "").my_collect();
-        assert_eq!(output.len(), 0);
+        let in_buf = "A\u{00a1}\u{01d6a9}".as_bytes();
+        assert_eq!(read_to_string(CharWhitelist::new(in_buf, "")).len(), 0);
     }
 
     #[test]
     fn whitelist_allows_all() {
         let s = "A\u{00a1}\u{1d6a9}";
-        let in_buf = s.as_bytes().to_vec();
-        let output = CharWhitelist::new(&in_buf[..], s).my_collect();
-        let output = String::from_utf8_lossy(&output);
-        assert_eq!(output, s);
+        assert_eq!(read_to_string(CharWhitelist::new(s.as_bytes(), s)), s);
     }
 
     #[test]
     fn whitelist_allows_single() {
         for allowed in vec!["A", "\u{00a1}", "\u{1d6a9}"] {
-            let in_buf = "A\u{00a1}\u{1d6a9}".as_bytes().to_vec();
-            let output = CharWhitelist::new(&in_buf[..], allowed).my_collect();
-            let output = String::from_utf8_lossy(&output);
-            assert_eq!(output, allowed);
+            let in_buf = "A\u{00a1}\u{1d6a9}".as_bytes();
+            assert_eq!(read_to_string(CharWhitelist::new(in_buf, allowed)), allowed);
         }
     }
-}
-
-#[cfg(test)]
-mod test_space_strip_iter_read {
-    // Don't have any tests in mind right now ... everything is probably already
-    // covered by (1) the tests that exercise .read for each type, and (2) the
-    // tests for this that exercise .next() via .my_collect().
 }
 
 #[cfg(test)]
