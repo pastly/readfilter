@@ -17,12 +17,12 @@ where
     source: T,
     /// Stores and accumulates bytes read from source.
     working_buf: [u8; BUF_SIZE],
-    /// The byte right after the last byte in the working_buf. AKA the next byte
-    /// that should be written into. When this is 0, the working_buf is empty.
-    /// Sometimes when we are read from, we might be told to fill a buffer that is smaller than the
-    /// amount of bytes we have read from the lower layer already. If this ends up being the case,
-    /// .read() stores a non-zero value here so .next() can be signaled to not overwrite data at
-    /// the very beginning of the working buffer.
+    /// The byte right after the last byte in the `working_buf`. The next byte that should be written
+    /// into, and the byte right after the last valid byte that can be read.  When this is 0,
+    /// `working_buf` is empty. Sometimes when we are read from, we might be told to fill a buffer
+    /// that is smaller than the amount of bytes we have read from the lower layer already. If this
+    /// ends up being the case, `.read()` stores a non-zero value here so `.next()` can be signaled
+    /// to not overwrite data at the very beginning of `working_buffer`.
     unconsumed_bytes: usize,
 }
 
