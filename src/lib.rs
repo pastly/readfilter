@@ -39,6 +39,192 @@ where
     }
 }
 
+/// Removes all non-whitelisted characters from the wrapped stream.
+///
+/// Non-utf8 characters are lost due to internal string conversions using
+/// [String::from_utf8_lossy()][String::from_utf8_lossy].
+///
+/// ```
+/// use readfilter::CharWhitelist;
+/// use std::io::Read;
+/// let buf = "aabbccddee".as_bytes();
+/// let mut wrapped = CharWhitelist::new(buf, "ace");
+/// let mut s = String::new();
+/// wrapped.read_to_string(&mut s).unwrap();
+/// assert_eq!(&s, "aaccee");
+/// ```
+///
+/// ```no_run
+/// use readfilter::CharWhitelist;
+/// use std::fs::OpenOptions;
+/// use std::io::Read;
+/// let mut output = vec![];
+/// let fd = OpenOptions::new().read(true).open("input.txt").unwrap();
+/// let mut input = CharWhitelist::new(fd, "01");
+/// input.read_to_end(&mut output);
+/// // output only contains the '0' and '1' characters from input.txt
+/// ```
+pub struct CharWhitelist<T>
+where
+    T: Read,
+{
+    common: Common<T>,
+    allowed_chars: Vec<char>,
+}
+
+impl<T> CharWhitelist<T>
+where
+    T: Read,
+{
+    pub fn new(source: T, allowed_chars: &str) -> Self {
+        Self {
+            common: Common::new(source),
+            allowed_chars: allowed_chars.chars().collect(),
+        }
+    }
+
+    fn next(&mut self) -> Option<io::Result<usize>> {
+        let mut read_previously = self.common.unconsumed_bytes;
+        // keep looping until we get an error, fail to read any bytes, or have
+        // read a full buffer
+        loop {
+            let read_this_time = self
+                .common
+                .source
+                .read(&mut self.common.working_buf[read_previously..]);
+            // return the error if there is one
+            if let Err(e) = read_this_time {
+                return Some(Err(e));
+            }
+            let read_this_time = read_this_time.unwrap();
+            // if we didn't read anything, time to stop looping
+            if read_this_time < 1 {
+                return Some(Ok(read_previously));
+            }
+            assert!(read_this_time > 0);
+            // convert [u8, BUF_SIZE] (with length read_this_time) to String
+            let buf = String::from_utf8_lossy(
+                &self.common.working_buf[read_previously..read_previously + read_this_time],
+            )
+            .into_owned();
+            for c in buf.chars() {
+                if self.allowed_chars.contains(&c) {
+                    let _ = c.encode_utf8(&mut self.common.working_buf[read_previously..]);
+                    read_previously += c.len_utf8();
+                }
+            }
+        }
+    }
+}
+
+/// Removes comments from the wrapped stream.
+///
+/// A comment starts with `#` and ends with a newline `\n` or the end of file.
+///
+/// ```
+/// use readfilter::CommentStrip;
+/// use std::io::Read;
+/// let mut input = CommentStrip::new("a\nb# foo\nc#bar".as_bytes());
+/// let mut output = String::new();
+/// input.read_to_string(&mut output);
+/// assert_eq!(output, "a\nbc");
+/// ```
+pub struct CommentStrip<T>
+where
+    T: Read,
+{
+    common: Common<T>,
+    /// Sometimes reads from source will end with a comment that isn't finished
+    /// yet. This flag is used to keep track of whether or not we need to keep
+    /// ignoring bytes until the comment ends (i.e. we see a newline)
+    ignore_until_next_newline: bool,
+}
+
+impl<T> CommentStrip<T>
+where
+    T: Read,
+{
+    pub fn new(source: T) -> Self {
+        Self {
+            common: Common::new(source),
+            ignore_until_next_newline: false,
+        }
+    }
+
+    fn next(&mut self) -> Option<io::Result<usize>> {
+        let mut read_previously = self.common.unconsumed_bytes;
+        // keep looping until we get an error, fail to read any bytes, or have
+        // read a full buffer
+        loop {
+            let read_this_time = self
+                .common
+                .source
+                .read(&mut self.common.working_buf[read_previously..]);
+            // return the error if there is one
+            if let Err(e) = read_this_time {
+                return Some(Err(e));
+            }
+            let read_this_time = read_this_time.unwrap();
+            // if we didn't read anything, time to stop looping
+            if read_this_time < 1 {
+                return Some(Ok(read_previously));
+            }
+            assert!(read_this_time > 0);
+            // convert [u8, BUF_SIZE] (with length read_this_time) to String
+            let mut buf = String::from_utf8_lossy(
+                &self.common.working_buf[read_previously..read_previously + read_this_time],
+            )
+            .into_owned();
+            // if needed, ignore bytes up through a newline
+            buf = if self.ignore_until_next_newline {
+                match buf.find('\n') {
+                    // found a newline. ignore bytes up through it, keep bytes after it, and unset
+                    // ignore_until_next_newline
+                    Some(idx) => {
+                        self.ignore_until_next_newline = false;
+                        buf[idx + 1..].to_string()
+                    }
+                    // didn't find newline. ignore all bytes
+                    None => String::new(),
+                }
+            } else {
+                buf
+            };
+            // if buffer empty, end early
+            if buf.is_empty() {
+                return Some(Ok(read_previously));
+            }
+            // loop until no more comments in buf
+            loop {
+                // look for comment character. if found, ignore bytes after it until newline
+                let start_idx = buf.find('#');
+                if start_idx.is_none() {
+                    break;
+                }
+                let start_idx = start_idx.unwrap();
+                buf = match buf[start_idx..].find('\n') {
+                    // newline found. ignore bytes between comment char and newline
+                    Some(end_idx) => {
+                        String::from(&buf[..start_idx]) + &buf[start_idx + end_idx + 1..]
+                    }
+                    // no newline found. ignore all bytes after comment char and set flag to keep
+                    // ignoring on next loop
+                    None => {
+                        self.ignore_until_next_newline = true;
+                        buf[..start_idx].to_string()
+                    }
+                };
+            }
+            let remaining_len = buf.len();
+            if remaining_len > 0 {
+                self.common.working_buf[read_previously..read_previously + remaining_len]
+                    .copy_from_slice(buf.as_bytes());
+                read_previously += remaining_len;
+            }
+        }
+    }
+}
+
 /// Each type impls Read. As all the hard work is done in self.next(), this can
 /// be generalized. .read() is probably how the user should be using these types.
 macro_rules! impl_read_trait_for_stream_iter {
@@ -129,208 +315,7 @@ macro_rules! impl_read_trait_for_stream_iter {
     };
 }
 
-/// Removes all non-whitelisted characters from the wrapped stream.
-///
-/// Non-utf8 characters are lost due to internal string conversions using
-/// [String::from_utf8_lossy()][String::from_utf8_lossy].
-///
-/// ```
-/// use readfilter::CharWhitelist;
-/// use std::io::Read;
-/// let buf = "aabbccddee".as_bytes();
-/// let mut wrapped = CharWhitelist::new(buf, "ace");
-/// let mut s = String::new();
-/// wrapped.read_to_string(&mut s).unwrap();
-/// assert_eq!(&s, "aaccee");
-/// ```
-///
-/// ```no_run
-/// use readfilter::CharWhitelist;
-/// use std::fs::OpenOptions;
-/// use std::io::Read;
-/// let mut output = vec![];
-/// let fd = OpenOptions::new().read(true).open("input.txt").unwrap();
-/// let mut input = CharWhitelist::new(fd, "01");
-/// input.read_to_end(&mut output);
-/// // output only contains the '0' and '1' characters from input.txt
-/// ```
-pub struct CharWhitelist<T>
-where
-    T: Read,
-{
-    common: Common<T>,
-    allowed_chars: Vec<char>,
-}
-
-impl<T> CharWhitelist<T>
-where
-    T: Read,
-{
-    pub fn new(source: T, allowed_chars: &str) -> Self {
-        Self {
-            common: Common::new(source),
-            allowed_chars: allowed_chars.chars().collect(),
-        }
-    }
-}
-
-impl<T> Iterator for CharWhitelist<T>
-where
-    T: Read,
-{
-    type Item = io::Result<usize>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let mut read_previously = self.common.unconsumed_bytes;
-        // keep looping until we get an error, fail to read any bytes, or have
-        // read a full buffer
-        loop {
-            let read_this_time = self
-                .common
-                .source
-                .read(&mut self.common.working_buf[read_previously..]);
-            // return the error if there is one
-            if let Err(e) = read_this_time {
-                return Some(Err(e));
-            }
-            let read_this_time = read_this_time.unwrap();
-            // if we didn't read anything, time to stop looping
-            if read_this_time < 1 {
-                return Some(Ok(read_previously));
-            }
-            assert!(read_this_time > 0);
-            // convert [u8, BUF_SIZE] (with length read_this_time) to String
-            let buf = String::from_utf8_lossy(
-                &self.common.working_buf[read_previously..read_previously + read_this_time],
-            )
-            .into_owned();
-            for c in buf.chars() {
-                if self.allowed_chars.contains(&c) {
-                    let _ = c.encode_utf8(&mut self.common.working_buf[read_previously..]);
-                    read_previously += c.len_utf8();
-                }
-            }
-        }
-    }
-}
-
 impl_read_trait_for_stream_iter!(CharWhitelist<T>);
-
-/// Removes comments from the wrapped stream.
-///
-/// A comment starts with `#` and ends with a newline `\n` or the end of file.
-///
-/// ```
-/// use readfilter::CommentStrip;
-/// use std::io::Read;
-/// let mut input = CommentStrip::new("a\nb# foo\nc#bar".as_bytes());
-/// let mut output = String::new();
-/// input.read_to_string(&mut output);
-/// assert_eq!(output, "a\nbc");
-/// ```
-pub struct CommentStrip<T>
-where
-    T: Read,
-{
-    common: Common<T>,
-    /// Sometimes reads from source will end with a comment that isn't finished
-    /// yet. This flag is used to keep track of whether or not we need to keep
-    /// ignoring bytes until the comment ends (i.e. we see a newline)
-    ignore_until_next_newline: bool,
-}
-
-impl<T> CommentStrip<T>
-where
-    T: Read,
-{
-    pub fn new(source: T) -> Self {
-        Self {
-            common: Common::new(source),
-            ignore_until_next_newline: false,
-        }
-    }
-}
-
-impl<T> Iterator for CommentStrip<T>
-where
-    T: Read,
-{
-    type Item = io::Result<usize>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let mut read_previously = self.common.unconsumed_bytes;
-        // keep looping until we get an error, fail to read any bytes, or have
-        // read a full buffer
-        loop {
-            let read_this_time = self
-                .common
-                .source
-                .read(&mut self.common.working_buf[read_previously..]);
-            // return the error if there is one
-            if let Err(e) = read_this_time {
-                return Some(Err(e));
-            }
-            let read_this_time = read_this_time.unwrap();
-            // if we didn't read anything, time to stop looping
-            if read_this_time < 1 {
-                return Some(Ok(read_previously));
-            }
-            assert!(read_this_time > 0);
-            // convert [u8, BUF_SIZE] (with length read_this_time) to String
-            let mut buf = String::from_utf8_lossy(
-                &self.common.working_buf[read_previously..read_previously + read_this_time],
-            )
-            .into_owned();
-            // if needed, ignore bytes up through a newline
-            buf = if self.ignore_until_next_newline {
-                match buf.find('\n') {
-                    // found a newline. ignore bytes up through it, keep bytes after it, and unset
-                    // ignore_until_next_newline
-                    Some(idx) => {
-                        self.ignore_until_next_newline = false;
-                        buf[idx + 1..].to_string()
-                    }
-                    // didn't find newline. ignore all bytes
-                    None => String::new(),
-                }
-            } else {
-                buf
-            };
-            // if buffer empty, end early
-            if buf.is_empty() {
-                return Some(Ok(read_previously));
-            }
-            // loop until no more comments in buf
-            loop {
-                // look for comment character. if found, ignore bytes after it until newline
-                let start_idx = buf.find('#');
-                if start_idx.is_none() {
-                    break;
-                }
-                let start_idx = start_idx.unwrap();
-                buf = match buf[start_idx..].find('\n') {
-                    // newline found. ignore bytes between comment char and newline
-                    Some(end_idx) => {
-                        String::from(&buf[..start_idx]) + &buf[start_idx + end_idx + 1..]
-                    }
-                    // no newline found. ignore all bytes after comment char and set flag to keep
-                    // ignoring on next loop
-                    None => {
-                        self.ignore_until_next_newline = true;
-                        buf[..start_idx].to_string()
-                    }
-                };
-            }
-            let remaining_len = buf.len();
-            if remaining_len > 0 {
-                self.common.working_buf[read_previously..read_previously + remaining_len]
-                    .copy_from_slice(buf.as_bytes());
-                read_previously += remaining_len;
-            }
-        }
-    }
-}
-
 impl_read_trait_for_stream_iter!(CommentStrip<T>);
 
 #[cfg(test)]
