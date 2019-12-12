@@ -1,12 +1,12 @@
 [package]
 name = "readfilter"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Matt Traudt <sirmatt@ksu.edu>"]
 edition = "2018"
 description = "Transparently wrap Readable things and filter their contents"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/pastly/readfilter"
-documentation = "https://doc.rs/readfilter"
+documentation = "https://docs.rs/readfilter"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
