@@ -3,6 +3,8 @@ name = "readfilter"
 version = "0.1.0"
 authors = ["Matt Traudt <sirmatt@ksu.edu>"]
 edition = "2018"
+description = "Transparently wrap Readable things and filter their contents"
+license = "MIT OR Apache-2.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
