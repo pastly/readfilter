@@ -264,52 +264,40 @@ macro_rules! impl_read_trait_for_stream_iter {
                 assert_eq!(self.common.unconsumed_bytes, 0);
                 // If we're here, then we must need to read some more bytes and give
                 // them to the out_buf. First try to read more.
-                match self.next() {
-                    // We failed to iterate forward in the stream. Must be done.
-                    None => {
+                let next_res = self.next();
+                if let Some(Ok(working_buf_len)) = next_res {
+                    // We successfully read something. working_buf_len is the number of bytes at
+                    // the front of the working buf that are valid. We have access to the working
+                    // buf since it is ours.
+                    let max_bytes_to_give = out_buf.len() - bytes_given;
+                    if working_buf_len >= max_bytes_to_give {
+                        // If we read too many bytes, then
+                        // 1. Give as many as possible to the out_buf
+                        // 2. Move the remaining working_buf bytes to the front of the working_buf
+                        // 3. Update the len of the working_buf And then we're done and can return.
+                        out_buf[bytes_given..]
+                            .copy_from_slice(&self.common.working_buf[..max_bytes_to_give]);
+                        self.common
+                            .working_buf
+                            .copy_within(max_bytes_to_give..working_buf_len, 0);
+                        self.common.unconsumed_bytes = working_buf_len - max_bytes_to_give;
+                        bytes_given += max_bytes_to_give;
+                        return Ok(bytes_given);
+                    } else {
+                        // We read fewer bytes than there is remaining space in out_buf. We can
+                        // give it all the bytes. For simplicity, just return after doing so. We
+                        // could loop around and do all this again.
+                        out_buf[bytes_given..bytes_given + working_buf_len]
+                            .copy_from_slice(&self.common.working_buf[..working_buf_len]);
+                        bytes_given += working_buf_len;
                         return Ok(bytes_given);
                     }
-                    // We might have successfully read something. The iterator returns an Option of
-                    // the number of bytes at the front of the working buf that are valid. We have
-                    // access to the working buf since it is ours.
-                    Some(res) => {
-                        match res {
-                            Err(e) => return Err(e),
-                            Ok(working_buf_len) => {
-                                let max_bytes_to_give = out_buf.len() - bytes_given;
-                                if working_buf_len >= max_bytes_to_give {
-                                    // If we read too many bytes, then
-                                    // 1. Give as many as possible to the out_buf
-                                    // 2. Move the remaining working_buf bytes to the
-                                    // front of the working_buf
-                                    // 3. Update the len of the working_buf
-                                    // And then we're done and can return.
-                                    out_buf[bytes_given..].copy_from_slice(
-                                        &self.common.working_buf[..max_bytes_to_give],
-                                    );
-                                    self.common
-                                        .working_buf
-                                        .copy_within(max_bytes_to_give..working_buf_len, 0);
-                                    self.common.unconsumed_bytes =
-                                        working_buf_len - max_bytes_to_give;
-                                    bytes_given += max_bytes_to_give;
-                                    return Ok(bytes_given);
-                                } else {
-                                    // We read fewer bytes than there is remaining space
-                                    // in out_buf. We can give it all the bytes. For
-                                    // simplicity, just return after doing so. We could
-                                    // loop around and do all this again.
-                                    out_buf[bytes_given..bytes_given + working_buf_len]
-                                        .copy_from_slice(
-                                            &self.common.working_buf[..working_buf_len],
-                                        );
-                                    bytes_given += working_buf_len;
-                                    return Ok(bytes_given);
-                                }
-                            }
-                        };
-                    }
-                };
+                } else if let Some(Err(e)) = next_res {
+                    return Err(e);
+                } else {
+                    // We failed to iterate forward in the stream. Must be done.
+                    return Ok(bytes_given);
+                }
             }
         }
     };
