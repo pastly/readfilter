@@ -1,6 +1,6 @@
 [package]
 name = "readfilter"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Matt Traudt <sirmatt@ksu.edu>"]
 edition = "2018"
 description = "Transparently wrap Readable things and filter their contents"
